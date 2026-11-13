@@ -1,0 +1,88 @@
+
+target Python
+
+// Vehicle 1: Read mmWave radar
+reactor RadarSensor {
+    output point_cloud
+    timer scan(0, 100 msec)
+
+    reaction(scan) -> point_cloud {=
+        # Placeholder radar data
+        points = [(1.0, 2.0), (1.2, 2.1)]
+        point_cloud.set(points)
+    =}
+}
+
+// Vehicle 1: Estimate human position and motion
+reactor HumanRecognition {
+    input point_cloud
+    output human_state
+
+    reaction(point_cloud) -> human_state {=
+        # Placeholder for HAR / skeleton model
+        human = {
+            "position": (1.1, 2.0),
+            "velocity": (0.5, 0.0)
+        }
+        human_state.set(human)
+    =}
+}
+
+// Vehicle 1: Sign and transmit information
+reactor Transmitter {
+    input human_state
+    output message
+
+    reaction(human_state) -> message {=
+        # TODO: Add coordinate frame, timestamp
+        # and cryptographic signature
+        message.set(human_state.value)
+    =}
+}
+
+// Vehicle 2: Receive and verify information
+reactor Receiver {
+    input message
+    output verified_state
+
+    reaction(message) -> verified_state {=
+        # TODO: Verify digital signature
+        # and reject stale messages
+        verified_state.set(message.value)
+    =}
+}
+
+// Vehicle 2: Evaluate collision risk
+reactor CollisionAvoidance {
+    input human_state
+
+    reaction(human_state) {=
+        human = human_state.value
+
+        # TODO: Transform coordinates into
+        # the secondary vehicle's reference frame
+
+        x, y = human["position"]
+
+        if x < 3.0:
+            print("Warning: pedestrian nearby!")
+            print("Action: slow down")
+        else:
+            print("Safe to continue")
+    =}
+}
+
+// Connect all components
+main reactor {
+    radar = new RadarSensor()
+    har = new HumanRecognition()
+    tx = new Transmitter()
+    rx = new Receiver()
+    safety = new CollisionAvoidance()
+
+    radar.point_cloud -> har.point_cloud
+    har.human_state -> tx.human_state
+    tx.message -> rx.message
+    rx.verified_state -> safety.human_state
+}
+
