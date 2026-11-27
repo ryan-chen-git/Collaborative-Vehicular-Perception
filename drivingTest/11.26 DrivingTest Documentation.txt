@@ -1,0 +1,23 @@
+This will act as a test for the basic driving prior to the radar's implementation into the controller logic
+
+Timeline:
+1) Create a track in room using black tape which will give the robot a straight path to
+	follow as well as use two horizontal strips to dictate a modal switch to test logic.
+	The pololu will drive forward with course correction through feedback loops using light
+	sensors. If both left and right sensors read tape, the robot will then switch modes from
+	driving to caution and from caution to yield. 
+2) Calibrate Sensor values 
+3) Create feedback loop course correction logic w/ state transitions
+4) Record any observations
+5) Move onto trajectory testing
+
+
+Process:
+1) Track is created, image is attached in this folder
+2) Sensor calibration file attached as well as these notes:
+	- The sensors read 1000 when on the tape with the exception of the middle sensor, likely due to tilt.
+		a value range of 850-1000 will be used for this test due to this variation.
+	- The template code for the pololu uses linux to compile the program, I did not want to go into my pc's
+		bios and enable virtualization and so I spent time changing the system to work natively on windows.
+3) Forgot to initiate calibration phase but we now have 4 states from calibration to driving logic 
+4) Should be noted that the left wheel seems faster than the right and that a motor calibration should be completed sooner than later

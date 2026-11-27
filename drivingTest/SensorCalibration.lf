@@ -1,0 +1,51 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Line from "lib/Line.lf"
+
+preamble {=
+  #include <stdio.h>
+=}
+
+main reactor(calibration_time: time = 10 s) {
+  timer t(0, 100 msec)
+  timer end_calibration(calibration_time)
+
+  display = new Display()
+  sensors = new Line()
+
+  reaction(t) -> sensors.trigger {=
+    lf_set(sensors.trigger, true);
+  =}
+
+  reaction(end_calibration) -> sensors.calibrate {=
+    lf_set(sensors.calibrate, false);
+  =}
+
+  reaction(sensors.reflect) -> display.line0, display.line1, display.line2 {=
+    static char buf0[17];
+    static char buf1[17];
+    static char buf2[17];
+
+    snprintf(buf0, 17, "L:%d R:%d",
+      (int)sensors.reflect->value[0],
+      (int)sensors.reflect->value[4]);
+
+    snprintf(buf1, 17, "ML:%d MR:%d",
+      (int)sensors.reflect->value[1],
+      (int)sensors.reflect->value[3]);
+
+    snprintf(buf2, 17, "Mid:%d",
+      (int)sensors.reflect->value[2]);
+
+    lf_set(display.line0, buf0);
+    lf_set(display.line1, buf1);
+    lf_set(display.line2, buf2);
+  =}
+}

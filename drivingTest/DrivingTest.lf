@@ -1,0 +1,105 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Motors from "lib/Motors.lf"
+import Line from "lib/Line.lf"
+
+preamble {=
+  #include <stdbool.h>
+  #define DRIVING_SPEED 0.15f //arbitrary speed to test driving
+  #define CAUTION_SPEED 0.08f //arbitrary speed to test slowing
+  #define STEERING 0.04f // arbitrary speed for course correction
+
+  static bool on_black(int value) {
+    return value >= 850 && value <= 1000;
+  }
+=}
+
+main reactor(calibration_time: time = 10 sec) {
+  timer t(0, 20 msec)
+  display = new Display()
+  motor = new Motors()
+  sensors = new Line()
+
+  state transitioning: bool = false
+
+  reaction(t) -> sensors.trigger {=
+    lf_set(sensors.trigger, true);
+  =}
+
+  initial mode STARTUP {
+    timer end_calibration(calibration_time)
+
+    reaction(startup) -> display.line0, display.line1, motor.left_power, motor.right_power {=
+      lf_set(display.line0, "STARTUP");
+      lf_set(display.line1, "Sweep light/dark");
+      lf_set(motor.left_power, 0.0f);
+      lf_set(motor.right_power, 0.0f);
+    =}
+
+    reaction(end_calibration) -> sensors.calibrate, display.line1, reset(DRIVING) {=
+      lf_set(sensors.calibrate, false);
+      lf_set(display.line1, "");
+      lf_set_mode(DRIVING);
+    =}
+  }
+
+  mode DRIVING {
+    reaction(sensors.reflect) ->
+    reset(CAUTION), display.line0, motor.left_power, motor.right_power {=
+      bool left = on_black(sensors.reflect->value[0]);
+      bool right = on_black(sensors.reflect->value[4]);
+      bool both = left && right;
+      bool event = both && !self->transitioning;
+      self->transitioning = both;
+
+      if (event) {
+        lf_set_mode(CAUTION);
+        lf_set(display.line0, "CAUTION");
+        lf_set(motor.left_power, CAUTION_SPEED);
+        lf_set(motor.right_power, CAUTION_SPEED);
+      } else {
+        float correction = STEERING * ((int)right - (int)left);
+        lf_set(display.line0, "DRIVING");
+        lf_set(motor.left_power, DRIVING_SPEED + correction);
+        lf_set(motor.right_power, DRIVING_SPEED - correction);
+      }
+    =}
+  }
+
+  mode CAUTION {
+    reaction(sensors.reflect) -> reset(YIELD), display.line0, motor.left_power, motor.right_power {=
+      bool left = on_black(sensors.reflect->value[0]);
+      bool right = on_black(sensors.reflect->value[4]);
+      bool both = left && right;
+      bool event = both && !self->transitioning;
+      self->transitioning = both;
+
+      if (event) {
+        lf_set_mode(YIELD);
+        lf_set(display.line0, "YIELD");
+        lf_set(motor.left_power, 0.0f);
+        lf_set(motor.right_power, 0.0f);
+      } else {
+        float correction = STEERING * ((int)right - (int)left);
+        lf_set(display.line0, "CAUTION");
+        lf_set(motor.left_power, CAUTION_SPEED + correction);
+        lf_set(motor.right_power, CAUTION_SPEED - correction);
+      }
+    =}
+  }
+
+  mode YIELD {
+    reaction(sensors.reflect) -> display.line0, motor.left_power, motor.right_power {=
+      lf_set(display.line0, "YIELD");
+      lf_set(motor.left_power, 0.0f);
+      lf_set(motor.right_power, 0.0f);
+    =}
+  }
+}
