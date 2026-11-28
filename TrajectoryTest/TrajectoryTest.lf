@@ -1,0 +1,412 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Motors from "lib/Motors.lf"
+import Line from "lib/Line.lf"
+import Encoders from "lib/Encoders.lf"
+
+preamble {=
+  #include <stdio.h>
+  #include <stdint.h>
+  #include <stdlib.h>
+  #include <stdbool.h>
+  #include <math.h>
+
+  #define RADAR_DT 0.1f
+  #define VEHICLE_DT 0.02f
+  // Empirically calibrated encoder conversion
+  #define METERS_PER_COUNT 0.0002849744f
+
+  // Calibrated motor powers
+  #define LEFT_POWER  0.1500f
+  #define RIGHT_POWER 0.1506f
+  #define CAUTION_LEFT 0.08f
+  #define CAUTION_RIGHT 0.0803f
+  #define STEERING 0.04f
+
+  // Trajectory prediction constants
+  #define X_BUFFER 0.1008f
+  #define Y_BUFFER 0.1008f
+  #define CLEARANCE_TIME 3.0f // 3 seconds of no pedestrian for car to start again
+  #define APPROACH_TIME 3.0f // threshold to begin slowdown
+  #define COLLISION_HORIZON 3.0f // if the pedestrian enters in the next X seconds we stop
+
+  // Radar stuff to be implimented later
+  //#define RADAR_TIMEOUT_MS 300
+
+
+  typedef struct {
+    float x;
+    float y;
+  } Vector2D;
+
+  typedef struct {
+    Vector2D position;
+    Vector2D velocity;
+    Vector2D acceleration;
+  } PedestrianData;
+
+  static inline float randomRange(float min, float max) {
+    return min + (max - min) * ((float)rand() / (float)RAND_MAX);
+  }
+
+  static inline bool onBlack(int value) {
+    return value >= 850 && value <= 1000;
+  }
+
+  static inline bool predictedCollision(float distance, float velocity, float yp, float vp, float ap) {
+    float tEnter = 0.0f;
+    float tExit = COLLISION_HORIZON;
+
+    if (velocity > 0.0f) {
+      tEnter = fmaxf((distance - X_BUFFER) / velocity, 0.0f);
+      tExit = fminf((distance + X_BUFFER) / velocity, COLLISION_HORIZON);
+      if (tEnter > tExit) return false;
+    } else if (fabsf(distance) > X_BUFFER) {
+      return false;
+    }
+    // A stationary vehicle inside the crossing occupies it for the horizon.
+    float yEnter = yp + tEnter * (vp + 0.5f * ap * tEnter);
+    float yExit = yp + tExit * (vp + 0.5f * ap * tExit);
+    float yMin = fminf(yEnter, yExit);
+    float yMax = fmaxf(yEnter, yExit);
+
+    if (fabsf(ap) > 0.000001f) {
+      float tTurn = -vp / ap;
+      if (tTurn > tEnter && tTurn < tExit) {
+        float yTurn = yp + tTurn * (vp + 0.5f * ap * tTurn);
+        yMin = fminf(yMin, yTurn);
+        yMax = fmaxf(yMax, yTurn);
+      }
+    }
+    return yMin <= Y_BUFFER && yMax >= -Y_BUFFER;
+  }
+=}
+
+// Randomized pedestrian data: starting point
+// Hopefully replace this later with the radar instead of recreating logic
+reactor SimulatedRadar {
+  input trigger: bool
+  output pedestrian: PedestrianData
+  state active: bool = false
+  state ticks: int = 0
+  state person: PedestrianData
+
+  // according to lf-lang.org this acts like a timer, but can be turned on when ready
+  logical action update
+
+  reaction(trigger) -> pedestrian, update {=
+    if (!trigger->value || self->active) {
+      return;
+    }else{
+      self->active = true;
+
+      //100 inches from origin in meters (marked on my testing track not like a forced constraint)
+      self->person.position.x = 2.54f;
+      self->person.position.y = randomRange(-0.4f, -0.15f);
+
+      // Initial velocity in m/s
+      self->person.velocity.x = 0.0f;
+      self->person.velocity.y = randomRange(0.05f, 0.2f);
+
+      // Initial acceleration in m/s^2
+      self->person.acceleration.x = 0.0f;
+      self->person.acceleration.y = randomRange(-0.1f, 0.1f);
+
+      //enable updates and summon a pedestrian from the ether
+      lf_schedule(update, MSEC(100));
+      lf_set(pedestrian, self->person);
+    }
+  =}
+
+  reaction(update) -> pedestrian, update {=
+    //scheduled at start to hopefully minimize timer drift
+    lf_schedule(update, MSEC(100));
+
+    // Update pedestrian position
+    self->person.position.x += self->person.velocity.x * RADAR_DT + 0.5f * self->person.acceleration.x * RADAR_DT * RADAR_DT;
+    self->person.position.y += self->person.velocity.y * RADAR_DT + 0.5f * self->person.acceleration.y * RADAR_DT * RADAR_DT;
+
+    // Update pedestrian velocity
+    self->person.velocity.x += self->person.acceleration.x * RADAR_DT;
+    self->person.velocity.y += self->person.acceleration.y * RADAR_DT;
+
+    if (self->ticks < 5) self->ticks++;
+
+    // Chance to randomize acceleration every 500 ms, repeats every 100ms if not triggered
+    if (self->ticks >= 5 && randomRange(0.0f, 1.0f) < 0.5f) {
+      self->person.acceleration.y = randomRange(-0.1f, 0.1f);
+      self->ticks = 0;
+    }else{
+      //realistically we're not just constantly accelerating when walking
+      self->person.acceleration.y = 0.0f;
+    }
+
+    lf_set(pedestrian, self->person);
+  =}
+}
+
+// Encoder-based position and velocity: second step
+reactor VehicleTracking {
+  input initialize: bool              // so encoders don't start before line sensor calibration :P
+  output position: float
+  output velocity: float
+  output ready: bool
+
+  encoders = new Encoders()
+  timer sample(0, 20 msec)
+
+  state enabled: bool = false
+  state zeroed: bool = false
+  state previousLeft: int32_t = 0
+  state previousRight: int32_t = 0
+  state vehiclePosition: float = 0.0  // in meters
+  state vehicleVelocity: float = 0.0  // in meters per second
+
+  reaction(initialize) {=
+    if (initialize->value && !self->enabled) {
+      self->enabled = true;
+    }
+  =}
+
+  reaction(sample) -> encoders.trigger {=
+    if (!self->enabled) {
+      return;
+    }
+    lf_set(encoders.trigger, true);
+  =}
+
+  reaction(encoders.left, encoders.right) -> position, velocity, ready {=
+    int32_t left = encoders.left->value;
+    int32_t right = encoders.right->value;
+
+    // Establish initial encoder reference
+    if (!self->zeroed) {
+      self->previousLeft = left;
+      self->previousRight = right;
+      self->zeroed = true;
+
+      lf_set(position, 0.0f);
+      lf_set(velocity, 0.0f);
+      lf_set(ready, true);
+      return;
+    }
+
+    int32_t deltaLeft = left - self->previousLeft;
+    int32_t deltaRight = right - self->previousRight;
+
+    float distanceLeft = deltaLeft * METERS_PER_COUNT;
+    float distanceRight = deltaRight * METERS_PER_COUNT;
+    float displacement = (distanceLeft + distanceRight) / 2.0f;
+
+    self->vehiclePosition += displacement;
+    self->vehicleVelocity = displacement / VEHICLE_DT;
+
+    self->previousLeft = left;
+    self->previousRight = right;
+
+    lf_set(position, self->vehiclePosition);
+    lf_set(velocity, self->vehicleVelocity);
+  =}
+}
+
+// Collision prediction and velocity restriction: third step
+reactor TrajectoryPredictor {
+  input pedestrian: PedestrianData
+  input vehiclePosition: float
+  input vehicleVelocity: float
+  output velocityFactor: float
+
+  state person: PedestrianData
+  state previousVelocity: float = 0.0
+  state pedestrianDetected: bool = false
+  state collision: bool = false
+  state stopTime: float = 0.0
+
+  reaction(pedestrian) {=
+    self->person = pedestrian->value;
+    self->pedestrianDetected = true;
+  =}
+
+  reaction(vehiclePosition, vehicleVelocity) -> velocityFactor {=
+    float velocity = vehicleVelocity->value;
+    float position = vehiclePosition->value;
+
+    if (!self->collision && velocity > 0.0f) {
+      self->previousVelocity = velocity;
+    }
+
+    // If no pedestrian is detected, allow full speed
+    if (!self->pedestrianDetected) {
+      lf_set(velocityFactor, -1.0f);
+      return;
+    }
+
+    float xp = self->person.position.x;
+    float yp = self->person.position.y;
+    float vp = self->person.velocity.y;
+    float ap = self->person.acceleration.y;
+
+    float distance = xp - position;
+
+    // Vehicle has already passed the crossing
+    if (distance < -X_BUFFER) {
+      self->collision = false;
+      self->stopTime = 0.0f;
+      lf_set(velocityFactor, -1.0f);
+      return;
+    }
+
+    float testVelocity = velocity;
+    if(self->collision) {
+      testVelocity = self->previousVelocity;
+    }
+
+    // If the pedestrian is too close to the road, stop immediately
+    if (fabsf(yp) <= Y_BUFFER || predictedCollision(distance, testVelocity, yp, vp, ap)) {
+      self->collision = true;
+      self->stopTime = 0.0f;
+      lf_set(velocityFactor, 0.0f);
+      return;
+    }
+
+
+    // The other statements return so if we reach here its safe to say you can consider there was
+    // no collision threat soon and you can start warming up to drive again :D
+    if (self->collision) {
+      self->stopTime += VEHICLE_DT;
+      if (self->stopTime < CLEARANCE_TIME) {
+        lf_set(velocityFactor, 0.0f);
+        return;
+      }else{
+        self->collision = false;
+        self->stopTime = 0.0f;
+      }
+    }
+
+    //slowdown factor if pedestrian closing in
+    float factor = 1.0f;
+    if (yp < -Y_BUFFER && vp > 0.0f) {
+      factor = fminf((-Y_BUFFER - yp) / (vp * APPROACH_TIME), 1.0f);
+    }
+    lf_set(velocityFactor, factor);
+  =}
+}
+
+// State machine and motor control: fourth step
+reactor Robot(calibrationTime: time = 10 sec) {
+  input ready: bool
+  input velocityFactor: float
+  output initialize: bool
+  output radarTrigger: bool           // temp for the way my test model is set up :P
+
+  timer t(0, 20 msec)
+  display = new Display()
+  motor = new Motors()
+  sensors = new Line()
+
+  state radarActivated: bool = false  // again temp for the way my test model is set up :P
+  state speedFactor: float = -1.0
+  state currLeft: float = {= LEFT_POWER =}
+  state currRight: float = {= RIGHT_POWER =}
+
+  reaction(t) -> sensors.trigger {=
+    lf_set(sensors.trigger, true);
+  =}
+
+  reaction(velocityFactor) {=
+    self->speedFactor = velocityFactor->value;
+
+    if (self->speedFactor < 0.0f) {
+      self->currLeft = LEFT_POWER;
+      self->currRight = RIGHT_POWER;
+    } else {
+      self->currLeft = CAUTION_LEFT * self->speedFactor;
+      self->currRight = CAUTION_RIGHT * self->speedFactor;
+    }
+  =}
+
+  initial mode STARTUP {
+    timer endCalibration(calibrationTime)
+    reaction(startup) -> display.line0, display.line1, motor.leftPower, motor.rightPower {=
+      lf_set(display.line0, "CALBRATING!");
+      lf_set(display.line1, "Sweep light/dark");
+      lf_set(motor.leftPower, 0.0f);
+      lf_set(motor.rightPower, 0.0f);
+    =}
+
+    reaction(endCalibration) -> sensors.calibrate, display.line1, reset(INITIALIZING) {=
+      lf_set(sensors.calibrate, false);
+      lf_set(display.line1, "");
+      lf_set_mode(INITIALIZING);
+    =}
+  }
+
+  mode INITIALIZING {
+    reaction(startup) -> initialize, display.line0 {=
+      lf_set(display.line0, "INITIALIZING TRACKER");
+      lf_set(initialize, true);
+    =}
+
+    reaction(ready) -> reset(DRIVING), motor.leftPower, motor.rightPower {=
+      if (ready->value) {
+        lf_set_mode(DRIVING);
+        lf_set(motor.leftPower, self->currLeft);
+        lf_set(motor.rightPower, self->currRight);
+      }
+    =}
+  }
+
+  mode DRIVING {
+    reaction(sensors.reflect) -> radarTrigger, display.line0, motor.leftPower, motor.rightPower {=
+      bool left = onBlack(sensors.reflect->value[0]);
+      bool right = onBlack(sensors.reflect->value[4]);
+
+      bool both = left && right;
+
+      if (both && !self->radarActivated) { //Event is temporary for the way my test model is set up :P
+        self->radarActivated = true;
+        lf_set(radarTrigger, true);
+      }
+
+      float scale = self->currLeft / LEFT_POWER;
+      float correction = STEERING * scale * ((int)right - (int)left);
+
+      lf_set(motor.leftPower, self->currLeft + correction);
+      lf_set(motor.rightPower, self->currRight - correction);
+
+      if (self->speedFactor == 0.0f) {
+        lf_set(display.line0, "STOPPED");
+      } else if (self->speedFactor < 0.0f) {
+        lf_set(display.line0, "DRIVING");
+      } else {
+        lf_set(display.line0, "CAUTION");
+      }
+    =}
+  }
+}
+
+// Instantiate and connect all reactors: as you go / final step
+main reactor {
+  radar = new SimulatedRadar()
+  tracker = new VehicleTracking()
+  predictor = new TrajectoryPredictor()
+  robot = new Robot()
+
+  robot.initialize -> tracker.initialize
+  tracker.ready -> robot.ready
+
+  robot.radarTrigger -> radar.trigger
+
+  radar.pedestrian -> predictor.pedestrian
+  tracker.position -> predictor.vehiclePosition
+  tracker.velocity -> predictor.vehicleVelocity
+
+  predictor.velocityFactor -> robot.velocityFactor after 0
+}

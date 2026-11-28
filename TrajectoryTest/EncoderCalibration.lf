@@ -1,0 +1,90 @@
+target C {
+  platform: {
+    name: "rp2040",
+    board: "pololu_3pi_2040_robot"
+  },
+  single-threaded: true
+}
+
+import Display from "lib/Display.lf"
+import Encoders from "lib/Encoders.lf"
+import Motors from "lib/Motors.lf"
+
+preamble {=
+    #include <stdio.h>
+    #include <stdint.h>
+    #include <stdbool.h>
+
+  #define LEFT_POWER  0.1500f
+  #define RIGHT_POWER 0.1506f
+=}
+
+main reactor {
+  encoders = new Encoders()
+  display = new Display()
+  motor = new Motors()
+
+  timer sample(0, 20 msec)
+
+  state initialLeft: int32_t = 0
+  state initialRight: int32_t = 0
+
+  reaction(sample) -> encoders.trigger {=
+    lf_set(encoders.trigger, true);
+  =}
+
+  initial mode STARTUP {
+    timer startDriving(5 sec)
+    reaction(startup) -> display.line0, display.line1, motor.leftPower, motor.rightPower {=
+      lf_set(display.line0, "STARTUP");
+      lf_set(display.line1, "Get ready");
+
+      lf_set(motor.leftPower, 0.0f);
+      lf_set(motor.rightPower, 0.0f);
+    =}
+
+    reaction(encoders.left, encoders.right) {=
+      self->initialLeft = encoders.left->value;
+      self->initialRight = encoders.right->value;
+    =}
+
+    reaction(startDriving) -> reset(DRIVING) {=
+      lf_set_mode(DRIVING);
+    =}
+  }
+
+  mode DRIVING {
+    timer stopDriving(5 sec)
+    reaction(startup) -> display.line0, display.line1, motor.leftPower, motor.rightPower {=
+      lf_set(display.line0, "DRIVING");
+      lf_set(display.line1, "");
+
+      lf_set(motor.leftPower, LEFT_POWER);
+      lf_set(motor.rightPower, RIGHT_POWER);
+    =}
+
+    reaction(stopDriving) -> reset(STOPPED) {=
+      lf_set_mode(STOPPED);
+    =}
+  }
+
+  mode STOPPED {
+    reaction(startup) -> motor.leftPower, motor.rightPower {=
+      lf_set(motor.leftPower, 0.0f);
+      lf_set(motor.rightPower, 0.0f);
+    =}
+
+    reaction(encoders.left, encoders.right) -> display.line0, display.line1 {=
+      int32_t left = encoders.left->value - self->initialLeft;
+      int32_t right = encoders.right->value - self->initialRight;
+
+      static char leftText[32];
+      static char rightText[32];
+      snprintf(leftText, sizeof(leftText), "L: %ld", (long)left);
+      snprintf(rightText, sizeof(rightText), "R: %ld", (long)right);
+
+      lf_set(display.line0, leftText);
+      lf_set(display.line1, rightText);
+    =}
+  }
+}

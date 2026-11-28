@@ -1,0 +1,36 @@
+Trajectory Test 11/27:
+
+Modified track to have a radar point and a pedestrian point
+	- The Radar point is when the simulated radar will begin to send information to the pololou
+	- The pedestrian point is to represent where on the X axis the pedestrian is (100 inches from starting point of car)
+
+Plan:
+	1) Create simulated radar reactor which randomizes pedestrian data
+	2) Create VehicleTracking reactor which uses encoders and tracks vehicle position and velocity
+	3) Create Trajectory predictor reactor which calculates collision prediction and target speed
+	4) Create robot reactor which controls states and motor speed
+	5) Create main reactor which combines all
+	6) Run multiple trials with recorded random values and vehicle response values 
+
+Notes:
+	Since random is seed based in C and the mbed restarts each time it will get the same random values on runs which helps at the start
+		but should be modified during trials 
+
+1) Using a logical action instead of a timer grants more control to the experiment maybe, not certain how it effects latency or if it adds timer drift
+2) Realized I should probably calibrate encoders and that reminded me I should calibrate the motors too, uuuuughhhhh 
+	2.a.1) I created an encoder calibration file and ran it three times. The left encoder consistnetly recorded around 0.79% more counts than the right wheel
+		using Pr = 0.15 * ELavg/ERavg I'm going to run it again and hopefully two birds one stone the calibration phase.
+	2.a.2) After some tests I came to the calibrated motor values of   #define LEFT_POWER  0.1500f  #define RIGHT_POWER 0.1506f
+		and the calibrated encoder avg of #define METERS_PER_COUNT 0.0002849744f
+3) Now that I'm at the stage for trajectory calculation, I recognize I never really put enough thought into things like safety buffers like minimum distance the
+	car should seek out when it has to stop before a pedestrian or the rate of deceleration. I need to think about this.
+	3.a) This really sucks and is going to need a good bit of refactoring possibly when it comes to the radar implimentation. Went through bouts of overcomplicating
+		then undercomplicating and what not so hopefully this logic is fine, what concerns me is how long it might take to run.
+4) Was simpler to impliment than the driving test, I decided to forgo any other states and just have all the control in one state using a scaler. Might revise later
+	if we decide that sticking to the multiple states is a necessity for us but I think this should work fine.
+5) Simple dimple
+6) About to start the trials, planning on recording all data somewhere 
+
+
+After a lot of obscure compiliation trials and tribulations, I have reached a file that compiles and uploads but haven't made a system that tracks data 
+to even see if it's working properly but it's already 2:00 am and I think it's best I rest now and reapproach tomorrow. This will end up being a two parter.
