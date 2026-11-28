@@ -1,0 +1,8 @@
+installed esp-idf
+installed toolchain (esp32,esp32s3,esp32c3 because idk which one we'll eventually use)
+development environment to use esp-idf tools is ( source ~/esp/esp-idf/export.sh ) 
+copied official esp-now example so we can just modify theirs as appropriate
+as a test, selected target microcontroller as esp32s3 (we can change later) and successfully built.
+Need to do: 
+adapt example source code into the dedicated receiver/transmitter programs 
+implement digital signing
